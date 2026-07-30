@@ -1,0 +1,39 @@
+# Python 3.11+
+#
+# === Владельцам NVIDIA-видеокарты: сначала поставьте CUDA-сборку torch! ===
+# Обычный `pip install torch` ставит CPU-сборку без поддержки CUDA. RealtimeSTT использует
+# torch.cuda.is_available() для выбора устройства и при CPU-сборке ВСЕГДА переключит
+# распознавание на CPU, даже если formально указано device=cuda - модель будет работать
+# в 15-20 раз медленнее (это же торч также попутно даёт ctranslate2 недостающие CUDA-библиотеки
+# вроде cublas64_12.dll, без него faster-whisper падает с ошибкой на GPU). Поэтому:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+#   pip install -r requirements.txt
+#
+# (порядок важен: если сначала поставить requirements.txt, RealtimeSTT молча подтянет
+# CPU-версию torch как обычную зависимость). Если видеокарты нет или она не NVIDIA - просто
+# `pip install -r requirements.txt` без этого шага, приложение само перейдёт в CPU-режим.
+
+# --- Этап 1: MVP (хоткей -> STT -> буфер обмена) ---
+RealtimeSTT
+# faster-whisper не тянется как обязательная зависимость RealtimeSTT (движки распознавания
+# подключаются по имени через отдельный пакет) - указываем явно.
+faster-whisper
+# Даёт RealtimeSTT локальный ONNX Silero VAD. Без него RealtimeSTT пытается скачать модель
+# через torch.hub с GitHub и виснет на интерактивном подтверждении доверия репозиторию.
+silero-vad
+pynput
+pyperclip
+# Используется для чтения объёма VRAM через NVML (входит в состав любого драйвера NVIDIA,
+# отдельный CUDA toolkit не требуется) - нужно для подбора модели по размеру видеопамяти.
+nvidia-ml-py
+
+# --- Этап 2: коррекция по словарю терминов ---
+rapidfuzz
+
+# --- Этап 4: трей + окно настроек ---
+pystray
+Pillow
+
+# --- Этап 5: сборка ---
+pyinstaller

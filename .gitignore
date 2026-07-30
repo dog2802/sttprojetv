@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
+
+# локальные настройки пользователя и модели, не публикуются
+config.json
+terms.txt
+dictionaries/
+models/
+realtimesst.log
+sttprojetv.log
+
+# сборка PyInstaller
+build/*.exe
+build/pyi-work/
+dist/
+*.spec.bak

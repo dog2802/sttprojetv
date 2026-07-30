@@ -1,0 +1,9 @@
+{
+  "model": "auto",
+  "device": "auto",
+  "compute_type": "auto",
+  "language": "ru",
+  "hotkey": "ctrl_r",
+  "microphone_index": null,
+  "direct_paste": false
+}

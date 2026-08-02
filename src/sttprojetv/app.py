@@ -11,13 +11,13 @@ from .hardware import resolve_settings
 from .hotkey import PushToTalkHotkey
 from .output import deliver_text
 from .pipeline import TextPipeline
-from .stt import SpeechToText
+from .stt import SpeechToText, ensure_model_downloaded
 
 logger = logging.getLogger(__name__)
 
 
 class Application:
-    def __init__(self) -> None:
+    def __init__(self, on_download_progress: Callable[[int, int], None] | None = None) -> None:
         self.config = load_config()
         self.profile = resolve_settings(self.config)
 
@@ -27,6 +27,13 @@ class Application:
         # словарь сейчас активен, и перечитывает его файл, поэтому и правки внутри словаря,
         # и переключение между словарями в настройках применяются сразу, без перезапуска.
         terms_at_startup = config_module.load_terms(config_module.get_active_dictionary(self.config))
+
+        # Скачиваем модель заранее, в основном процессе, чтобы видеть реальный прогресс -
+        # RealtimeSTT грузит её уже внутри отдельного процесса транскрипции, откуда прогресс
+        # наружу не передать. on_download_progress передаётся конструктору, а не через
+        # set_..._callback, потому что скачивание происходит прямо здесь, синхронно.
+        ensure_model_downloaded(self.profile.model, on_progress=on_download_progress)
+
         self.stt = SpeechToText(
             profile=self.profile,
             language=self.config["language"],
@@ -132,6 +139,7 @@ class Application:
 
             if stt_changed:
                 self.profile = resolve_settings(self.config)
+                ensure_model_downloaded(self.profile.model)
                 new_stt = SpeechToText(
                     profile=self.profile,
                     language=self.config["language"],

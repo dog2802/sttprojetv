@@ -17,3 +17,5 @@ build/*.exe
 build/pyi-work/
 dist/
 *.spec.bak
+
+scratch/

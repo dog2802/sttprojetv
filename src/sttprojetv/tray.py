@@ -7,14 +7,18 @@ import pystray
 from PIL import Image, ImageDraw
 
 _STATUS_COLORS = {
-    "idle": (128, 128, 128, 255),      # серый - ожидание
-    "listening": (220, 50, 50, 255),   # красный - идёт запись
-    "processing": (230, 170, 40, 255), # жёлтый - распознаю
+    "loading": (60, 140, 220, 255),     # синий - первый запуск, грузим/качаем модель
+    "idle": (128, 128, 128, 255),       # серый - ожидание
+    "listening": (220, 50, 50, 255),    # красный - идёт запись
+    "processing": (230, 170, 40, 255),  # жёлтый - распознаю
+    "error": (150, 0, 0, 255),          # тёмно-красный - ошибка при запуске
 }
 _STATUS_LABELS = {
+    "loading": "STTProjetV - загрузка модели (может занять несколько минут при первом запуске)...",
     "idle": "STTProjetV - ожидание",
     "listening": "STTProjetV - запись...",
     "processing": "STTProjetV - распознаю...",
+    "error": "STTProjetV - ошибка запуска, смотрите sttprojetv.log",
 }
 
 
@@ -37,8 +41,8 @@ class TrayIcon:
         )
         self._icon = pystray.Icon(
             "sttprojetv",
-            _make_icon_image(_STATUS_COLORS["idle"]),
-            _STATUS_LABELS["idle"],
+            _make_icon_image(_STATUS_COLORS["loading"]),
+            _STATUS_LABELS["loading"],
             menu=menu,
         )
 
@@ -47,6 +51,11 @@ class TrayIcon:
             return
         self._icon.icon = _make_icon_image(_STATUS_COLORS[status])
         self._icon.title = _STATUS_LABELS[status]
+
+    def set_loading_progress(self, percent: int) -> None:
+        """Обновляет только подсказку (иконка остаётся синей "загрузка") - вызывается часто
+        во время скачивания модели, поэтому не трогает картинку, только текст."""
+        self._icon.title = f"STTProjetV - скачиваю модель... {percent}%"
 
     def run(self) -> None:
         """Блокирующий вызов - запускать в отдельном потоке."""

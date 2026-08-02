@@ -138,20 +138,34 @@ class Application:
             self.hotkey.stop()
 
             if stt_changed:
-                self.profile = resolve_settings(self.config)
-                ensure_model_downloaded(self.profile.model)
-                new_stt = SpeechToText(
-                    profile=self.profile,
-                    language=self.config["language"],
-                    microphone_index=new_mic,
-                    initial_prompt=", ".join(self._get_active_terms()) or None,
-                )
-                old_stt = self.stt
-                self.stt = new_stt
-                old_stt.shutdown()
-                self._active_model = new_model
-                self._active_microphone_index = new_mic
+                try:
+                    self.profile = resolve_settings(self.config)
+                    ensure_model_downloaded(self.profile.model)
+                    new_stt = SpeechToText(
+                        profile=self.profile,
+                        language=self.config["language"],
+                        microphone_index=new_mic,
+                        initial_prompt=", ".join(self._get_active_terms()) or None,
+                    )
+                    old_stt = self.stt
+                    self.stt = new_stt
+                    old_stt.shutdown()
+                    self._active_model = new_model
+                    self._active_microphone_index = new_mic
+                except Exception:
+                    # Не оставляем в config.json нерабочий выбор (например, модель, которую
+                    # не получилось скачать) - иначе при каждом следующем запуске программа
+                    # заново и безуспешно повторяла бы ту же попытку. Откатываем на последнее
+                    # реально рабочее состояние.
+                    logger.exception(
+                        "Не удалось применить новую модель/микрофон - откатываю настройки"
+                    )
+                    self.config["model"] = self._active_model
+                    self.config["microphone_index"] = self._active_microphone_index
+                    config_module.save_config(self.config)
 
+            # Хоткей должен перезапуститься в любом случае, даже если смена модели выше
+            # не удалась - иначе push-to-talk перестал бы работать до перезапуска программы.
             self.hotkey = PushToTalkHotkey(
                 key_name=new_hotkey_name,
                 on_press=self._on_hotkey_press,
@@ -160,11 +174,22 @@ class Application:
             self._active_hotkey_name = new_hotkey_name
             self.hotkey.start()
 
-            logger.info("Новые настройки применены")
+            logger.info("Применение настроек завершено")
             self._set_status("idle")
             self._set_reload_status("ready")
         except Exception:
             logger.exception("Не удалось применить новые настройки")
+            # Даже при неожиданной ошибке (например, в самом PushToTalkHotkey) стараемся
+            # оставить хоткей рабочим, а не немым до перезапуска программы.
+            try:
+                self.hotkey = PushToTalkHotkey(
+                    key_name=self._active_hotkey_name,
+                    on_press=self._on_hotkey_press,
+                    on_release=self._on_hotkey_release,
+                )
+                self.hotkey.start()
+            except Exception:
+                logger.exception("Не удалось восстановить хоткей после ошибки")
             self._set_status("idle")
             self._set_reload_status("ready")
         finally:

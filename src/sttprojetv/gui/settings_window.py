@@ -6,18 +6,32 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Any, Callable
 
 from pynput import mouse as pynput_mouse
 from pynput.mouse import Button as MouseButton
 
 from .. import config as config_module
-from ..hotkey import MOUSE_PREFIX
+from ..hardware import detect_hardware
+from ..hotkey import MOUSE_PREFIX, is_mouse_trigger
 
 logger = logging.getLogger(__name__)
 
 MODEL_OPTIONS = ["auto", "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+
+# Порядок "тяжести" моделей - используется только чтобы предупредить пользователя, если он
+# вручную выбрал модель тяжелее той, что для его видеокарты подобрало бы автоопределение
+# (см. hardware.detect_hardware). large-v3 весит и грузится заметно дольше turbo, хотя обеим
+# формально хватает 6 ГБ VRAM - поэтому она тут на ранг тяжелее.
+_MODEL_WEIGHT_RANK = {
+    "tiny": 0,
+    "base": 1,
+    "small": 2,
+    "medium": 3,
+    "large-v3-turbo": 4,
+    "large-v3": 5,
+}
 
 MODEL_DESCRIPTIONS = {
     "auto": "Подобрать автоматически под ваше железо (рекомендуется)",
@@ -81,6 +95,7 @@ _LIGHT_PALETTE = {
     "tooltip_bg": "#ffffff",
     "tooltip_fg": "#000000",
     "icon_fg": "#000000",
+    "warning_fg": "#b35c00",
 }
 _DARK_PALETTE = {
     "bg": "#2b2b2b",
@@ -92,6 +107,7 @@ _DARK_PALETTE = {
     "tooltip_bg": "#454545",
     "tooltip_fg": "#ffffff",
     "icon_fg": "#ffffff",
+    "warning_fg": "#ffa94d",
 }
 
 # Tkinter keysym -> имя клавиши в формате pynput (см. hotkey.parse_key).
@@ -149,6 +165,20 @@ def _mouse_button_to_name(button: MouseButton) -> str | None:
 
 def _hotkey_display_name(name: str) -> str:
     return _HOTKEY_DISPLAY_NAMES.get(name, name)
+
+
+_RISKY_NON_CHAR_KEYS = {"space", "enter", "tab"}
+
+
+def _is_risky_hotkey(name: str) -> bool:
+    """Клавиши, которые непрерывно нажимаются при обычном наборе текста (буквы/цифры,
+    пробел, Enter, Tab). Назначить их хоткеем - значит превратить КАЖДОЕ их нажатие в ЛЮБОЙ
+    другой программе в запуск записи голоса, что практически ломает набор текста в системе
+    в целом. Боковые кнопки мыши сюда не попадают - они не участвуют в обычном наборе."""
+    if is_mouse_trigger(name):
+        return False
+    key = name.strip().lower()
+    return len(key) == 1 or key in _RISKY_NON_CHAR_KEYS
 
 
 def _fix_mojibake(name: str) -> str:
@@ -324,6 +354,9 @@ class SettingsWindow:
         self._current_palette = _LIGHT_PALETTE
         self._help_icons: list[ttk.Label] = []
         self._themed_comboboxes: list[ttk.Combobox] = []
+        # Считаем один раз при открытии окна - используется только чтобы подсказать
+        # пользователю, если выбранная им модель тяжелее той, что подобрало бы автоопределение.
+        self._auto_profile = detect_hardware()
 
     def show(self, parent: tk.Tk) -> None:
         if self._toplevel is not None and self._toplevel.winfo_exists():
@@ -355,8 +388,26 @@ class SettingsWindow:
 
     def _on_theme_toggle(self, is_dark: bool) -> None:
         self._config["theme"] = "dark" if is_dark else "light"
-        config_module.save_config(self._config)
+        self._save_config_safe()
+        # Даже если сохранение на диск не удалось - переключатель уже в новом положении,
+        # тема должна перекраситься сейчас же, а не оставаться "нажатой, но без эффекта".
         self._apply_theme(is_dark)
+
+    def _save_config_safe(self) -> None:
+        """Сохраняет self._config на диск, не роняя окно настроек, если это не получилось
+        (диск заполнен, файл занят антивирусом и т.п.) - вызывающий код всегда уже применил
+        изменение в памяти до вызова, так что программа продолжает работать с новым значением,
+        просто оно не переживёт перезапуск, пока проблема не решится."""
+        try:
+            config_module.save_config(self._config)
+        except Exception:
+            logger.exception("Не удалось сохранить настройки на диск")
+            messagebox.showwarning(
+                "STTProjetV",
+                "Не удалось сохранить настройки на диск. Изменение применено только для "
+                "текущего запуска и не переживёт перезапуск программы, пока проблема не "
+                "решится (диск заполнен, файл занят другой программой и т.п.).",
+            )
 
     def _make_help_icon(self, parent: tk.Widget, text: str) -> ttk.Label:
         icon = ttk.Label(parent, text="❔", foreground=self._current_palette["icon_fg"], cursor="question_arrow")
@@ -406,6 +457,7 @@ class SettingsWindow:
         if self._theme_switch is not None:
             self._theme_switch.set_bg(palette["bg"])
         self._model_description_label.configure(foreground=palette["muted_fg"])
+        self._model_warning_label.configure(foreground=palette["warning_fg"])
         for icon in self._help_icons:
             icon.configure(foreground=palette["icon_fg"])
         for combobox in self._themed_comboboxes:
@@ -558,12 +610,22 @@ class SettingsWindow:
     def _on_dictionary_selected(self) -> None:
         self._active_dictionary_name = self._dictionary_var.get()
         self._config["active_dictionary"] = self._active_dictionary_name
-        config_module.save_config(self._config)
+        self._save_config_safe()
         self._load_terms_into_listbox()
 
     def _load_terms_into_listbox(self) -> None:
         self._terms_listbox.delete(0, tk.END)
-        for term in config_module.load_terms(self._active_dictionary_name):
+        try:
+            terms = config_module.load_terms(self._active_dictionary_name)
+        except Exception:
+            logger.exception("Не удалось прочитать словарь терминов")
+            messagebox.showwarning(
+                "STTProjetV",
+                f"Не удалось прочитать словарь «{self._active_dictionary_name}» с диска. "
+                "Список ниже временно пуст.",
+            )
+            return
+        for term in terms:
             self._terms_listbox.insert(tk.END, term)
 
     def _add_term(self) -> None:
@@ -582,9 +644,22 @@ class SettingsWindow:
         self._save_terms()
 
     def _save_terms(self) -> None:
-        config_module.save_terms(
-            self._active_dictionary_name, list(self._terms_listbox.get(0, tk.END))
-        )
+        try:
+            config_module.save_terms(
+                self._active_dictionary_name, list(self._terms_listbox.get(0, tk.END))
+            )
+        except Exception:
+            # В отличие от config.json (он в памяти живёт как self._config, разделяемый с
+            # Application - см. _save_config_safe), словарь терминов Application перечитывает
+            # с диска перед каждой фразой (см. TextPipeline/_get_active_terms), в памяти нигде
+            # не хранится. Поэтому при сбое записи изменение не подхватится даже в текущем
+            # запуске, а не только не переживёт перезапуск.
+            logger.exception("Не удалось сохранить словарь терминов на диск")
+            messagebox.showwarning(
+                "STTProjetV",
+                "Не удалось сохранить словарь терминов на диск - изменение не применилось. "
+                "Попробуйте ещё раз (диск заполнен, файл занят другой программой и т.п.).",
+            )
 
     # --- остальные настройки ---
 
@@ -614,22 +689,32 @@ class SettingsWindow:
         self._model_combo.grid(row=1, column=1, padx=5, pady=5)
         self._themed_comboboxes.append(self._model_combo)
 
+        model_info_frame = ttk.Frame(frame)
+        model_info_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=5)
+
         self._model_description_var = tk.StringVar(
             value=MODEL_DESCRIPTIONS.get(self._model_var.get(), "")
         )
         self._model_description_label = ttk.Label(
-            frame, textvariable=self._model_description_var, foreground="#666666", wraplength=260
+            model_info_frame, textvariable=self._model_description_var, foreground="#666666", wraplength=260
         )
-        self._model_description_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=5)
+        self._model_description_label.pack(anchor="w")
+
+        self._model_warning_var = tk.StringVar(value="")
+        self._model_warning_label = ttk.Label(
+            model_info_frame, textvariable=self._model_warning_var, wraplength=260
+        )
 
         def on_model_selected(event: tk.Event) -> None:
             self._model_description_var.set(MODEL_DESCRIPTIONS.get(self._model_var.get(), ""))
+            self._refresh_model_warning()
             self._on_field_changed()
 
         self._model_combo.bind("<<ComboboxSelected>>", on_model_selected)
         _attach_dropdown_hover(
             self._model_combo, MODEL_OPTIONS, MODEL_DESCRIPTIONS, self._model_description_var
         )
+        self._refresh_model_warning()
 
         ttk.Label(frame, text="Хоткей (push-to-talk):").grid(
             row=3, column=0, sticky="w", padx=5, pady=5
@@ -682,6 +767,28 @@ class SettingsWindow:
         ).pack(side=tk.LEFT)
         self._make_help_icon(type_row, _HELP_TEXTS["output_type"]).pack(side=tk.LEFT, padx=(4, 0))
 
+    def _refresh_model_warning(self) -> None:
+        """Показывает мягкое предупреждение, если выбранная вручную модель тяжелее той, что
+        подобрало бы автоопределение под текущую видеокарту - выбор не блокируется, просто
+        предупреждаем, что загрузка может быть медленной (см. лог тестера с зависанием на
+        large-v3 вместо рекомендованной large-v3-turbo на 6 ГБ VRAM)."""
+        selected = self._model_var.get()
+        selected_rank = _MODEL_WEIGHT_RANK.get(selected)
+        auto_rank = _MODEL_WEIGHT_RANK.get(self._auto_profile.model)
+
+        if selected == "auto" or selected_rank is None or auto_rank is None or selected_rank <= auto_rank:
+            self._model_warning_label.pack_forget()
+            return
+
+        vram_text = f"{self._auto_profile.vram_gb:.0f} ГБ" if self._auto_profile.vram_gb else "неизвестно"
+        self._model_warning_var.set(
+            f"⚠ Тяжелее, чем рекомендовано для вашей видеокарты (VRAM: {vram_text}) - "
+            f"автоматически выбралась бы «{self._auto_profile.model}». Загрузка может быть "
+            "медленной или зависнуть."
+        )
+        self._model_warning_label.configure(foreground=self._current_palette["warning_fg"])
+        self._model_warning_label.pack(anchor="w", pady=(2, 0))
+
     def _current_mic_name(self, mic_names: list[str]) -> str:
         current_index = self._config.get("microphone_index")
         if current_index is None:
@@ -716,7 +823,17 @@ class SettingsWindow:
             self._on_field_changed()
 
         def on_key(event: tk.Event) -> None:
-            finish(_keysym_to_pynput_name(event.keysym))
+            name = _keysym_to_pynput_name(event.keysym)
+            if _is_risky_hotkey(name) and not messagebox.askyesno(
+                "STTProjetV",
+                f"Клавиша «{_hotkey_display_name(name)}» часто используется при обычном "
+                "наборе текста. Если назначить её хоткеем, каждое её нажатие в ЛЮБОЙ "
+                "программе будет запускать запись голоса. Всё равно назначить?",
+                icon="warning",
+                parent=prompt,
+            ):
+                return
+            finish(name)
 
         def on_mouse_click(x: int, y: int, button: MouseButton, pressed: bool) -> None:
             if not pressed:
@@ -750,7 +867,10 @@ class SettingsWindow:
         self._config["hotkey"] = self._hotkey_var.get()
         self._config["microphone_index"] = microphone_index
         self._config["output_mode"] = self._output_mode_var.get()
-        config_module.save_config(self._config)
+        self._save_config_safe()
 
+        # self._config - тот же словарь, что держит Application (передан по ссылке), так что
+        # изменение выше уже видно ей независимо от того, удалось ли сохранить на диск -
+        # запускаем применение live-изменения в любом случае, а не только при удачной записи.
         if self._on_config_changed is not None:
             self._on_config_changed()

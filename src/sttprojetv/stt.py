@@ -15,6 +15,7 @@ from typing import Callable
 from RealtimeSTT import AudioToTextRecorder
 from tqdm import tqdm as _tqdm
 
+from .errors import AppError
 from .hardware import HardwareProfile
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,11 @@ def ensure_model_downloaded(
     уже полностью в кэше - сеть вообще не трогаем (работает офлайн)."""
     import huggingface_hub
 
-    repo_id = _resolve_model_repo_id(model_name)
+    try:
+        repo_id = _resolve_model_repo_id(model_name)
+    except Exception as exc:
+        # Например, config.json подправили руками и указали несуществующее имя модели.
+        raise AppError("E101", str(exc)) from exc
 
     try:
         huggingface_hub.snapshot_download(
@@ -101,12 +106,38 @@ def ensure_model_downloaded(
             return result
 
     logger.info("Скачиваю модель %s (%s)...", model_name, repo_id)
-    huggingface_hub.snapshot_download(
-        repo_id,
-        allow_patterns=_MODEL_DOWNLOAD_PATTERNS,
-        tqdm_class=_ProgressTqdm,
-    )
+    try:
+        huggingface_hub.snapshot_download(
+            repo_id,
+            allow_patterns=_MODEL_DOWNLOAD_PATTERNS,
+            tqdm_class=_ProgressTqdm,
+        )
+    except Exception as exc:
+        raise AppError("E101", str(exc)) from exc
     logger.info("Модель %s скачана", model_name)
+
+
+def _check_microphone_index(index: int | None) -> None:
+    """Проверяет, что выбранный микрофон всё ещё существует и поддерживает запись - иначе
+    RealtimeSTT падает с малопонятной ошибкой PortAudio глубоко внутри своей инициализации
+    (например, если микрофон отключили или сменили USB-порт после выбора в настройках)."""
+    if index is None:
+        return
+    try:
+        import pyaudio
+    except ImportError:
+        return
+
+    pa = pyaudio.PyAudio()
+    try:
+        info = pa.get_device_info_by_index(index)
+    except Exception as exc:
+        raise AppError("E104", f"микрофон с индексом {index} недоступен") from exc
+    finally:
+        pa.terminate()
+
+    if info.get("maxInputChannels", 0) <= 0:
+        raise AppError("E104", f"устройство {index} не поддерживает запись")
 
 
 class SpeechToText:
@@ -117,6 +148,8 @@ class SpeechToText:
         microphone_index: int | None = None,
         initial_prompt: str | None = None,
     ) -> None:
+        _check_microphone_index(microphone_index)
+
         kwargs: dict = dict(
             model=profile.model,
             device=profile.device,
@@ -138,7 +171,12 @@ class SpeechToText:
             profile.device,
             profile.compute_type,
         )
-        self._recorder = AudioToTextRecorder(**kwargs)
+        try:
+            self._recorder = AudioToTextRecorder(**kwargs)
+        except AppError:
+            raise
+        except Exception as exc:
+            raise AppError("E102", str(exc)) from exc
         logger.info("Модель загружена, готов к работе")
 
     def start_recording(self) -> None:
